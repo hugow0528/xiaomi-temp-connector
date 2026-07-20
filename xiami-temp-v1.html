@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LYWSD03MMC 藍牙儀表板</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 { text-align: center; color: #0071e3; }
+        .btn-container { text-align: center; margin-bottom: 20px; }
+        button {
+            background-color: #0071e3;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background-color: #0077ed; }
+        button:disabled { background-color: #86868b; }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        .data-val { font-size: 24px; font-weight: bold; color: #1d1d1f; margin-top: 5px; }
+        .status { text-align: center; color: #86868b; font-style: italic; }
+        .log-box { max-height: 150px; overflow-y: auto; background: #eee; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <h1>Mijia LYWSD03MMC Dashboard</h1>
+    
+    <div class="btn-container">
+        <button id="connectBtn">連接米家溫度計</button>
+    </div>
+
+    <div class="status" id="statusText">狀態：未連接</div>
+
+    <!-- 即時數據 Card -->
+    <div class="card">
+        <h3>即時環境數據 (Live Data)</h3>
+        <div>溫度：<span id="tempVal" class="data-val">--</span> °C</div>
+        <div style="margin-top: 10px;">濕度：<span id="humVal" class="data-val">--</span> %</div>
+    </div>
+
+    <!-- 電量 Card -->
+    <div class="card">
+        <h3>裝置資訊 (Device Info)</h3>
+        <div>電池電量：<span id="batVal" class="data-val">--</span> %</div>
+        <div style="margin-top: 10px;">電池電壓：<span id="voltVal" class="data-val">--</span> V</div>
+    </div>
+
+    <!-- 歷史紀錄 Card -->
+    <div class="card">
+        <h3>最近接收到的歷史紀錄原始碼 (History Log)</h3>
+        <div class="log-box" id="logBox">等待歷史數據流...</div>
+    </div>
+
+    <script>
+        // 定義藍牙服務同埋特徵碼的 UUID
+        const MI_SERVICE_UUID = 'ebe0ccb0-7a0a-4b0c-8a1a-6ff2997da3a6';
+        const LIVE_DATA_UUID  = 'ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6';
+        const BATTERY_UUID    = 'ebe0ccc4-7a0a-4b0c-8a1a-6ff2997da3a6';
+        const HISTORY_UUID    = 'ebe0ccbc-7a0a-4b0c-8a1a-6ff2997da3a6'; // 留意第一張圖的 History NOTIFY UUID
+
+        const connectBtn = document.getElementById('connectBtn');
+        const statusText = document.getElementById('statusText');
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                statusText.innerText = "狀態：正在搜尋藍牙裝置...";
+                
+                // 1. 請求藍牙裝置
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'LYWSD03MMC' }],
+                    optionalServices: [MI_SERVICE_UUID]
+                });
+
+                statusText.innerText = "狀態：正在連接 GATT Server...";
+                const server = await device.gatt.connect();
+
+                statusText.innerText = "狀態：正在獲取主服務...";
+                const service = await server.getPrimaryService(MI_SERVICE_UUID);
+
+                statusText.innerText = "狀態：成功連接！正在讀取數據...";
+                connectBtn.disabled = true;
+
+                // 2. 讀取電量百分比 (ebe0ccc4)
+                try {
+                    const batChar = await service.getCharacteristic(BATTERY_UUID);
+                    const batValue = await batChar.readValue();
+                    document.getElementById('batVal').innerText = batValue.getUint8(0);
+                } catch(e) { console.log("讀取電量失敗", e); }
+
+                // 3. 訂閱即時溫濕度通知 (ebe0ccc1)
+                try {
+                    const liveChar = await service.getCharacteristic(LIVE_DATA_UUID);
+                    await liveChar.startNotifications();
+                    liveChar.addEventListener('characteristicvaluechanged', (event) => {
+                        const data = event.target.value;
+                        // 解碼溫度 (Byte 0-1, Little-Endian)
+                        const temp = data.getInt16(0, true) / 100;
+                        // 解碼濕度 (Byte 2)
+                        const hum = data.getUint8(2);
+                        // 解碼電壓 (Byte 3-4, Little-Endian)
+                        const volt = data.getUint16(3, true) / 1000;
+
+                        document.getElementById('tempVal').innerText = temp.toFixed(1);
+                        document.getElementById('humVal').innerText = hum;
+                        document.getElementById('voltVal').innerText = volt.toFixed(3);
+                    });
+                } catch(e) { console.log("訂閱即時數據失敗", e); }
+
+                // 4. 訂閱歷史紀錄通知 (ebe0ccbc)
+                try {
+                    const histChar = await service.getCharacteristic(HISTORY_UUID);
+                    await histChar.startNotifications();
+                    histChar.addEventListener('characteristicvaluechanged', (event) => {
+                        const data = event.target.value;
+                        // 將 Raw hex 轉返做字串顯示出嚟
+                        let hexArray = [];
+                        for (let i = 0; i < data.byteLength; i++) {
+                            hexArray.push(data.getUint8(i).toString(16).toUpperCase().padStart(2, '0'));
+                        }
+                        const hexStr = hexArray.join('-');
+                        
+                        const logBox = document.getElementById('logBox');
+                        logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${hexStr}<br>` + logBox.innerHTML;
+                    });
+                } catch(e) { console.log("訂閱歷史紀錄失敗", e); }
+
+                statusText.innerText = `狀態：已連接到 ${device.name}，監聽數據中...`;
+
+                device.addEventListener('gattserverdisconnected', () => {
+                    statusText.innerText = "狀態：藍牙已斷開連線";
+                    connectBtn.disabled = false;
+                });
+
+            } catch (error) {
+                console.error(error);
+                statusText.innerText = `錯誤：${error.message}`;
+                connectBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
